@@ -105,7 +105,11 @@ def rpc(command, route_prefix="/rpc/", method="GET", permission_required=None):
             else:
                 # kwargs.update({"argument": argument, "permissions": permissions, "user_id": user_id, "token": token})
                 if kwargs is not None:
-                    arguments = dict((name, kwargs[name]) for name in inspect.getargspec(func).args if name in kwargs)
+                    arguments = {
+                        name: kwargs[name]
+                        for name in inspect.signature(func).parameters
+                        if name in kwargs
+                    }
                     arguments.update(kwargs)
                 else:
                     arguments = {}
