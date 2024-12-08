@@ -10,7 +10,7 @@ from micropsi_core.world.island import png
 class Island(World):
     """ A simple Doerner Island-World"""
 
-    supported_worldadapters = ['Braitenberg', 'Survivor', 'StructuredObjects']
+    supported_worldadapters = ['Braitenberg', 'Survivor', 'StructuredObjects', 'ElectricRobot']
 
     groundmap = {
         'image': "psi_1.png",
@@ -27,6 +27,7 @@ class Island(World):
         'icons': {
             'Lightsource': 'island/lamp.png',
             'Braitenberg': 'island/braitenberg.png',
+            'ElectricRobot': 'island/robot-small.png',
             'Survivor': 'island/Micropsi.png',
             'PalmTree': 'island/palm-tree.png',
             'Maple': 'island/maple.png',
@@ -460,6 +461,144 @@ class Braitenberg(WorldAdapter):
 
         self.datasources['brightness_l'] = brightness_l
         self.datasources['brightness_r'] = brightness_r
+        
+class ElectricRobot(WorldAdapter):
+    """A robot-like agent with energy that can move using leg engines and charge from energy sources.
+       If energy reaches zero, the robot does not die, but becomes effectively 'discharged' (cannot move)."""
+
+    # Movement geometry parameters similar to a bipedal or wheeled system, adjusting if needed
+    diameter = 50
+    radius = 25
+    speed_limit = 1.0
+
+    def __init__(self, world, uid=None, **data):
+        super(ElectricRobot, self).__init__(world, uid, **data)
+
+        # The robot starts with full energy
+        self.energy = 1.0
+
+        # It never dies, but can become discharged (energy=0)
+        self.is_discharged = False
+
+        # Data sources: one for energy
+        self.datasources = {
+            'energy': self.energy
+        }
+
+        # Data targets for movement and charging
+        self.datatargets = {
+            'leg_engine_l': 0,
+            'leg_engine_r': 0,
+            'action_charge': 0
+        }
+
+        # Feedback
+        self.datatarget_feedback = {
+            'leg_engine_l': 0,
+            'leg_engine_r': 0,
+            'action_charge': 0
+        }
+
+        # Orientation and position
+        self.orientation = 0.0
+        if "position" in data:
+            self.position = data["position"]
+        else:
+            self.position = self.world.groundmap.get('start_position', (0, 0))
+
+    def initialize_worldobject(self, data):
+        if "position" not in data:
+            self.position = self.world.groundmap.get('start_position', (0, 0))
+
+    def update_data_sources_and_targets(self):
+        # If energy is zero, consider it discharged; it cannot move or do actions that cost energy
+        if self.energy <= 0:
+            self.energy = 0
+            self.is_discharged = True
+        else:
+            self.is_discharged = False
+
+        # Movement only if not discharged
+        if not self.is_discharged:
+            self.apply_movement()
+
+        nearest_worldobject = self.find_nearest_worldobject()
+
+        # Handle charge action if requested
+        self.handle_actions(nearest_worldobject)
+
+        # Update energy costs (even if not moving, there's a small upkeep)
+        self.update_energy_costs()
+
+        # Update datasource
+        self.datasources["energy"] = self.energy
+
+    def apply_movement(self):
+        l_speed = self.datatargets["leg_engine_l"]
+        r_speed = self.datatargets["leg_engine_r"]
+
+        # Reset datatargets after reading
+        self.datatargets["leg_engine_l"] = 0
+        self.datatargets["leg_engine_r"] = 0
+
+        # Constrain speed if too high
+        if l_speed + r_speed > 2 * self.speed_limit:
+            f = 2 * self.speed_limit / (l_speed + r_speed)
+            r_speed *= f
+            l_speed *= f
+
+        rotation = math.degrees((self.radius * l_speed - self.radius * r_speed) / self.diameter)
+        self.orientation += rotation
+        avg_velocity = (self.radius * r_speed + self.radius * l_speed) / 2
+        translation = _2d_rotate((0, avg_velocity), self.orientation + rotation)
+
+        # Move in the world if allowed
+        self.position = self.world.get_movement_result(self.position, translation, self.diameter)
+
+    def find_nearest_worldobject(self):
+        lowest_distance = float("inf")
+        nearest_worldobject = None
+        for key, worldobject in self.world.objects.items():
+            dist = _2d_distance_squared(self.position, worldobject.position)
+            if dist < lowest_distance:
+                lowest_distance = dist
+                nearest_worldobject = worldobject
+        return nearest_worldobject
+
+    def handle_actions(self, nearest_worldobject):
+        # Charge if action requested and not discharged (Though can we allow charging while discharged?
+        # If so, it can recharge from zero anyway)
+        if self.datatargets['action_charge'] >= 1:
+            self.datatargets['action_charge'] = 0
+            if hasattr(nearest_worldobject, 'action_charge'):
+                cando, delta_energy = nearest_worldobject.action_charge()
+                if cando:
+                    self.energy = min(self.energy + delta_energy, 1.0)
+                    self.datatarget_feedback['action_charge'] = 1
+                    logging.getLogger("agent.%s" % self.uid).debug("Robot charged energy: +%f" % delta_energy)
+                else:
+                    self.datatarget_feedback['action_charge'] = 0
+            else:
+                self.datatarget_feedback['action_charge'] = 0
+
+    def update_energy_costs(self):
+        # Basic upkeep cost
+        self.energy -= 0.002
+
+        # Additional cost if movement was attempted
+        # Even if the robot had no energy to move, attempting movement could still cost minimal energy.
+        # If you prefer to not charge for movement when energy=0, handle condition here.
+        if not self.is_discharged:
+            ground_type_index = self.world.get_ground_at(self.position[0], self.position[1])
+            efficiency = ground_types[ground_type_index]['move_efficiency']
+            # A simple formula: harder terrain costs more energy
+            self.energy -= (0.01 * (2 - efficiency))
+
+        if self.energy < 0:
+            self.energy = 0
+
+    def is_discharged(self):
+        return self.is_discharged
 
 
 def _2d_rotate(position, angle_degrees):
